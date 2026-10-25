@@ -184,7 +184,20 @@ export const CloudOpsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [activeTab, setActiveTabState] = useState<string>(() => {
+    try {
+      const savedTab = localStorage.getItem('cloudops_active_tab');
+      if (savedTab) return savedTab;
+    } catch {}
+    return 'dashboard';
+  });
+
+  const setActiveTab = (tab: string) => {
+    setActiveTabState(tab);
+    try {
+      localStorage.setItem('cloudops_active_tab', tab);
+    } catch {}
+  };
   const [selectedRegion, setSelectedRegion] = useState<string>('us-east-1 (Norte de Virginia)');
   const [isFailoverActive, setIsFailoverActive] = useState<boolean>(false);
 

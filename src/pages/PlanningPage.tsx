@@ -89,8 +89,8 @@ export const PlanningPage: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
 
   // Estados para GitHub real
-  const [githubOwner, setGithubOwner] = useState('makecindy');
-  const [githubRepo, setGithubRepo] = useState('cindy');
+  const [githubOwner, setGithubOwner] = useState('');
+  const [githubRepo, setGithubRepo] = useState('');
   const [githubToken, setGithubToken] = useState('');
   const [auditResult, setAuditResult] = useState<RepoAuditResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
