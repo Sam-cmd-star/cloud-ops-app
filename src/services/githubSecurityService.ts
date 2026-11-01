@@ -479,7 +479,7 @@ function pickFilesForAi(files: Map<string, string>): { path: string; content: st
   return out;
 }
 
-async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysis; model?: string } | { ok: false; note: string }> {
+async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysis; model?: string; missing: string[] } | { ok: false; note: string }> {
   try {
     const res = await fetch(ANALYZE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await res.json().catch(() => ({}));
@@ -487,7 +487,7 @@ async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysi
     if (res.status === 401) return { ok: false, note: 'El despliegue exige autenticación (Deployment Protection de Vercel); usa el dominio de producción del proyecto' };
     if (res.status === 504) return { ok: false, note: data?.error ?? 'La IA tardó demasiado en responder (tiempo límite del servidor); vuelve a intentarlo' };
     if (!res.ok || !data?.analysis) return { ok: false, note: data?.error ?? `El servicio de IA respondió ${res.status}.` };
-    return { ok: true, analysis: data.analysis as AiAnalysis, model: typeof data.model === 'string' ? data.model : undefined };
+    return { ok: true, analysis: data.analysis as AiAnalysis, model: typeof data.model === 'string' ? data.model : undefined, missing: Array.isArray(data.missing) ? data.missing.filter((m: unknown) => typeof m === 'string') : [] };
   } catch {
     return { ok: false, note: 'El servicio de IA no está disponible (¿falta desplegar /api/analyze?).' };
   }
@@ -619,7 +619,7 @@ export async function auditRepository(owner: string, repo: string, token?: strin
     lockText ? 'Dependencias: solo npm y solo las directas (las transitivas no se auditan); versiones tomadas de package-lock.json.' : 'Dependencias: solo npm y solo las directas; sin package-lock.json se usa la versión mínima declarada.',
     `Se leyeron ${files.size} de ${candidates} archivos de texto (tope de ${MAX_SCAN_FILES}).`,
     ...(treeData.truncated ? ['El árbol del repositorio es muy grande y GitHub lo devolvió incompleto.'] : []),
-    ...(!ai.ok ? [] : ['La IA solo recibió fragmentos de los archivos clave, con credenciales redactadas.', 'Las observaciones y buenas prácticas de la IA son estimaciones: verifícalas en el archivo citado antes de darlas por ciertas.']),
+    ...(!ai.ok ? [] : ['La IA solo recibió fragmentos de los archivos clave, con credenciales redactadas.', 'Las observaciones y buenas prácticas de la IA son estimaciones: verifícalas en el archivo citado antes de darlas por ciertas.', ...(ai.missing.length ? [`La IA no alcanzó a completar: ${ai.missing.join(' y ')}. Vuelve a analizar para obtenerlo.`] : [])]),
   ];
 
   return {
