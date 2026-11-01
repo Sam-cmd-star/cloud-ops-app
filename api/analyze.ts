@@ -12,6 +12,10 @@
  */
 declare const process: { env: Record<string, string | undefined> };
 
+// Tiempo máximo propio (ms). Debe ser menor que maxDuration de vercel.json (60 s) para responder con un
+// mensaje claro en vez de que Vercel corte con un 504 vacío. AI_DEADLINE_MS solo se usa en pruebas.
+const DEADLINE_MS = Number(process.env.AI_DEADLINE_MS) || 50_000;
+
 const FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'];
 const MODELS = [process.env.GEMINI_MODEL, ...FALLBACK_MODELS].filter((m, i, arr): m is string => !!m && arr.indexOf(m) === i);
 
@@ -50,15 +54,22 @@ const HTTP_ERRORS: Record<number, string> = {
   429: 'Se alcanzó el límite gratuito de Gemini; espera un minuto e inténtalo de nuevo',
 };
 
-async function callGemini(model: string, apiKey: string, serialized: string): Promise<Response> {
+async function callGemini(model: string, apiKey: string, serialized: string, lowThinking: boolean, signal: AbortSignal): Promise<Response> {
   return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
+    signal,
     headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: SYSTEM }] },
       contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
-      // 8192 deja margen: en los modelos con "thinking" los tokens de razonamiento cuentan dentro del límite.
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.2,
+        // 8192 deja margen: en los modelos con "thinking" los tokens de razonamiento cuentan dentro del límite.
+        maxOutputTokens: 8192,
+        // Gemini 3 razona en nivel "high" por defecto, lo que tarda demasiado para esta tarea.
+        ...(lowThinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {}),
+      },
     }),
   });
 }
@@ -77,15 +88,22 @@ export default async function handler(req: any, res: any) {
   if (serialized.length > 150_000) return res.status(413).json({ error: 'La evidencia enviada es demasiado grande.' });
 
   try {
+    const started = Date.now();
+    const left = () => DEADLINE_MS - (Date.now() - started);
+    const minLeft = Math.min(8000, DEADLINE_MS / 4);
     // Se pasa al siguiente modelo solo si este no existe (404) o no tiene cupo (429).
     let apiRes: Response | null = null;
     let used = '';
     for (const model of MODELS) {
-      apiRes = await callGemini(model, apiKey, serialized);
+      if (left() < minLeft) break;
+      let r = await callGemini(model, apiKey, serialized, true, AbortSignal.timeout(left()));
+      // Si el modelo no acepta thinkingLevel (400), se reintenta una vez sin ese parámetro.
+      if (r.status === 400 && left() > minLeft) r = await callGemini(model, apiKey, serialized, false, AbortSignal.timeout(left()));
+      apiRes = r;
       used = model;
-      if (apiRes.status !== 404 && apiRes.status !== 429) break;
+      if (r.status !== 404 && r.status !== 429) break;
     }
-    if (!apiRes) return res.status(502).json({ error: 'No hay modelos configurados.' });
+    if (!apiRes) return res.status(504).json({ error: 'La IA tardó demasiado y se canceló para no bloquear el análisis. Inténtalo de nuevo.' });
     if (!apiRes.ok) {
       const msg = apiRes.status === 404
         ? `Ningún modelo está disponible (probados: ${MODELS.join(', ')}); define GEMINI_MODEL con uno vigente de Google AI Studio`
@@ -102,7 +120,10 @@ export default async function handler(req: any, res: any) {
     if (start < 0 || end <= start) return res.status(502).json({ error: `La IA (${used}) no devolvió un JSON válido (respuesta vacía o cortada).` });
 
     return res.status(200).json({ analysis: JSON.parse(text.slice(start, end + 1)), model: used });
-  } catch {
+  } catch (e: any) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      return res.status(504).json({ error: 'La IA tardó demasiado y se canceló para no bloquear el análisis. Inténtalo de nuevo.' });
+    }
     return res.status(502).json({ error: 'No se pudo completar el análisis con IA.' });
   }
 }

@@ -485,6 +485,7 @@ async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysi
     const data = await res.json().catch(() => ({}));
     if (res.status === 404) return { ok: false, note: 'No se encontró /api/analyze en este servidor (usa la URL desplegada o configura el proxy de Vite)' };
     if (res.status === 401) return { ok: false, note: 'El despliegue exige autenticación (Deployment Protection de Vercel); usa el dominio de producción del proyecto' };
+    if (res.status === 504) return { ok: false, note: data?.error ?? 'La IA tardó demasiado en responder (tiempo límite del servidor); vuelve a intentarlo' };
     if (!res.ok || !data?.analysis) return { ok: false, note: data?.error ?? `El servicio de IA respondió ${res.status}.` };
     return { ok: true, analysis: data.analysis as AiAnalysis, model: typeof data.model === 'string' ? data.model : undefined };
   } catch {
