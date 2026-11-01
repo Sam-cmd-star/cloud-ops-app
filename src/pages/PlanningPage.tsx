@@ -78,6 +78,33 @@ const buildDescription = (services: string[]): string =>
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 
+type Tone = 'idle' | 'ok' | 'warn' | 'bad';
+const TONE_CLASS: Record<Tone, string> = { idle: 'text-slate-400', ok: 'text-emerald-600', warn: 'text-amber-600', bad: 'text-red-600' };
+const STATUS_STYLE: Record<string, { border: string; badge: string; label: string }> = {
+  passed: { border: 'border-emerald-200', badge: 'bg-emerald-100 text-emerald-800', label: 'Aprobado' },
+  warning: { border: 'border-amber-200', badge: 'bg-amber-100 text-amber-800', label: 'Advertencia' },
+  failed: { border: 'border-red-200', badge: 'bg-red-100 text-red-800', label: 'Crítico' },
+  unverified: { border: 'border-slate-200', badge: 'bg-slate-100 text-slate-600', label: 'No verificable' },
+};
+
+const summaryCards = (r: RepoAuditResult | null): { label: string; tone: Tone; text: string }[] => {
+  const c = r?.checks;
+  return [
+    {
+      label: 'Secretos / API Keys',
+      tone: !c || c.secretsFound === null ? 'idle' : c.secretsFound === 0 ? 'ok' : 'bad',
+      text: !c ? '—' : c.secretsFound === null ? 'No verificado' : c.secretsFound === 0 ? '0 detectados' : `${c.secretsFound} posibles`,
+    },
+    {
+      label: 'Branch Protection',
+      tone: !c || c.branchProtected === null ? 'idle' : c.branchProtected ? 'ok' : 'warn',
+      text: !c ? '—' : c.branchProtected === null ? 'No verificable' : c.branchProtected ? 'Protegida' : 'Sin protección',
+    },
+    { label: 'Security Policy', tone: !c ? 'idle' : c.hasSecurityPolicy ? 'ok' : 'warn', text: !c ? '—' : c.hasSecurityPolicy ? 'Presente' : 'No hallado' },
+    { label: 'CI/CD Pipeline', tone: !c ? 'idle' : c.hasCiCd ? 'ok' : 'warn', text: !c ? '—' : c.hasCiCd ? 'Workflows activos' : 'Sin workflows' },
+  ];
+};
+
 export const PlanningPage: React.FC = () => {
   const { proposals, addProposal, updateProposal, deleteProposal, setActiveTab } = useCloudOps();
 
@@ -102,7 +129,7 @@ export const PlanningPage: React.FC = () => {
     try {
       const result = await auditRepository(githubOwner.trim(), githubRepo.trim(), githubToken.trim() ? githubToken.trim() : undefined);
       setAuditResult(result);
-      setNotice(`Análisis completado para ${result.repoName} (Score: ${result.securityScore}%)`);
+      setNotice(`Análisis completado para ${result.repoName}${result.securityScore === null ? '' : ` (Score: ${result.securityScore}%)`}`);
     } catch (err: any) {
       setAuditError(err.message || 'Error al conectar con la API de GitHub.');
       setAuditResult(null);
@@ -211,7 +238,8 @@ export const PlanningPage: React.FC = () => {
   const slaNote = SLA_OPTIONS.find((o) => o.value === form.availabilityLevel)?.note;
   const regionLabel = REGION_OPTIONS.find((r) => r.value === form.selectedRegion)?.id;
 
-  const currentScore = auditResult ? auditResult.securityScore : 95;
+  const currentScore = auditResult ? auditResult.securityScore : null;
+  const scoreColor = currentScore === null ? 'text-slate-400' : currentScore >= 80 ? 'text-emerald-600' : currentScore >= 60 ? 'text-amber-600' : 'text-red-600';
 
   return (
     <div className="space-y-6">
@@ -233,7 +261,7 @@ export const PlanningPage: React.FC = () => {
         </div>
       )}
 
-      {/* SECCIÓN: Analizador con Motor IA y GitHub API */}
+      {/* SECCIÓN: Analizador de repositorios (escáneres reales + IA) */}
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4" aria-label="Analizador de seguridad de repositorios">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-100 pb-3">
           <div className="flex items-center gap-3">
@@ -241,8 +269,8 @@ export const PlanningPage: React.FC = () => {
               <ShieldCheck className="h-6 w-6" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-800">Analizador Inteligente de Repositorios (Motor IA Dinámico)</h3>
-              <p className="text-xs text-slate-500">Procesa metadatos y estadísticas reales de GitHub para perfilar proyectos automáticamente.</p>
+              <h3 className="text-base font-bold text-slate-800">Analizador Inteligente de Repositorios</h3>
+              <p className="text-xs text-slate-500">Lee el código real del repositorio, ejecuta escáneres de seguridad y pide a la IA una revisión de arquitectura.</p>
             </div>
           </div>
           <button
@@ -252,40 +280,26 @@ export const PlanningPage: React.FC = () => {
             className="flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50"
           >
             {isAnalyzing ? <RotateCcw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-            {isAnalyzing ? 'Analizando con IA...' : 'Analizar con IA'}
+            {isAnalyzing ? 'Analizando repositorio...' : 'Analizar repositorio'}
           </button>
         </div>
+
+        <p className="text-[11px] text-slate-500">
+          Indica el repositorio y pulsa analizar. Para repos privados agrega un token de solo lectura; el token se envía únicamente a GitHub, nunca a la IA.
+        </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs">
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Owner / Usuario GitHub</label>
-            <input
-              type="text"
-              value={githubOwner}
-              onChange={(e) => setGithubOwner(e.target.value)}
-              placeholder="ej. makecindy"
-              className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs"
-            />
+            <input type="text" value={githubOwner} onChange={(e) => setGithubOwner(e.target.value)} placeholder="ej. makecindy" className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs" />
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Nombre del Repositorio</label>
-            <input
-              type="text"
-              value={githubRepo}
-              onChange={(e) => setGithubRepo(e.target.value)}
-              placeholder="ej. cindy"
-              className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs"
-            />
+            <input type="text" value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="ej. cindy" className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs" />
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">GitHub Token (Opcional - Privados)</label>
-            <input
-              type="password"
-              value={githubToken}
-              onChange={(e) => setGithubToken(e.target.value)}
-              placeholder="ghp_xxxxxxxxxxxx"
-              className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs"
-            />
+            <input type="password" value={githubToken} onChange={(e) => setGithubToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className="w-full rounded border border-slate-300 p-1.5 bg-white text-xs" />
           </div>
         </div>
 
@@ -298,98 +312,154 @@ export const PlanningPage: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center bg-slate-50 rounded-xl p-4 border border-slate-200/60">
           <div className="flex items-center gap-3 md:col-span-1 border-b md:border-b-0 md:border-r border-slate-200 pb-3 md:pb-0">
-            <div className="relative flex items-center justify-center">
-              <span className="text-2xl font-extrabold text-slate-800">{currentScore}%</span>
-            </div>
+            <span className={`text-2xl font-extrabold ${scoreColor}`}>{currentScore === null ? '—' : `${currentScore}%`}</span>
             <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 block">Postura Segura IA</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Postura de seguridad</span>
               <span className="text-xs text-slate-600 font-medium">{auditResult ? auditResult.repoName : 'Sin analizar'}</span>
             </div>
           </div>
-
           <div className="md:col-span-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-            <div className="rounded-lg bg-white p-2.5 border border-slate-200 shadow-xs">
-              <span className="block text-[10px] text-slate-400 font-semibold uppercase">Secretos / API Keys</span>
-              <span className="text-sm font-bold text-emerald-600 flex items-center justify-center gap-1 mt-0.5">
-                <CheckCircle2 className="h-3.5 w-3.5" /> 0 expuestos
-              </span>
-            </div>
-            <div className="rounded-lg bg-white p-2.5 border border-slate-200 shadow-xs">
-              <span className="block text-[10px] text-slate-400 font-semibold uppercase">Branch Protection</span>
-              <span className={`text-sm font-bold flex items-center justify-center gap-1 mt-0.5 ${auditResult && !auditResult.checks.branchProtection ? 'text-amber-600' : 'text-emerald-600'}`}>
-                {auditResult && !auditResult.checks.branchProtection ? <AlertCircle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                {auditResult && !auditResult.checks.branchProtection ? '1 pendiente' : 'Protegida'}
-              </span>
-            </div>
-            <div className="rounded-lg bg-white p-2.5 border border-slate-200 shadow-xs">
-              <span className="block text-[10px] text-slate-400 font-semibold uppercase">Security Policy</span>
-              <span className={`text-sm font-bold flex items-center justify-center gap-1 mt-0.5 ${auditResult && auditResult.checks.securityPolicy ? 'text-emerald-600' : 'text-slate-400'}`}>
-                {auditResult && auditResult.checks.securityPolicy ? <CheckCircle2 className="h-3.5 w-3.5" /> : 'No hallado'}
-              </span>
-            </div>
-            <div className="rounded-lg bg-white p-2.5 border border-slate-200 shadow-xs">
-              <span className="block text-[10px] text-slate-400 font-semibold uppercase">CI/CD Pipeline</span>
-              <span className={`text-sm font-bold flex items-center justify-center gap-1 mt-0.5 ${auditResult && auditResult.checks.ciCdPipeline ? 'text-emerald-600' : 'text-amber-600'}`}>
-                {auditResult && auditResult.checks.ciCdPipeline ? <CheckCircle2 className="h-3.5 w-3.5" /> : 'Sin workflows'}
-              </span>
-            </div>
+            {summaryCards(auditResult).map((c) => (
+              <div key={c.label} className="rounded-lg bg-white p-2.5 border border-slate-200">
+                <span className="block text-[10px] text-slate-400 font-semibold uppercase">{c.label}</span>
+                <span className={`text-sm font-bold mt-0.5 block ${TONE_CLASS[c.tone]}`}>{c.text}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Perfil del Proyecto Generado por IA */}
-        {auditResult && auditResult.profile && (
+        {/* Metodología y desglose del puntaje */}
+        {auditResult && (
+          <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3 text-xs">
+            <h4 className="font-bold text-slate-800 uppercase tracking-wider text-xs">Metodología y desglose del puntaje</h4>
+            <p className="text-slate-600">
+              Se leyeron <strong>{auditResult.methodology.filesScanned}</strong> de {auditResult.methodology.filesCandidates} archivos de texto
+              ({auditResult.methodology.filesInTree} en el repositorio). Métodos: {auditResult.methodology.scanners.join(' · ')}.
+              {' '}El puntaje lo calculan solo los escáneres; la IA no lo modifica.
+            </p>
+            <ul className="space-y-2">
+              {auditResult.scoreBreakdown.map((s) => (
+                <li key={s.category}>
+                  <div className="flex items-center justify-between gap-2 text-slate-700">
+                    <span>{s.label} <span className="text-slate-400">(peso {s.weight}%)</span></span>
+                    <span className="font-mono font-semibold">{s.score === null ? 'No verificable' : `${s.score}/100`}</span>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded bg-slate-100">
+                    <div className={`h-1.5 rounded ${s.score === null ? 'bg-slate-300' : s.score >= 80 ? 'bg-emerald-500' : s.score >= 60 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${s.score ?? 0}%` }} />
+                  </div>
+                  <span className="text-[11px] text-slate-500">{s.note}</span>
+                </li>
+              ))}
+            </ul>
+            <details className="text-slate-500">
+              <summary className="cursor-pointer font-semibold text-slate-600">Limitaciones del análisis</summary>
+              <ul className="mt-1 list-disc pl-5 space-y-0.5">
+                {auditResult.methodology.limitations.map((l) => <li key={l}>{l}</li>)}
+              </ul>
+            </details>
+          </div>
+        )}
+
+        {/* Perfil del proyecto */}
+        {auditResult && (
           <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-4 space-y-3">
             <h4 className="font-bold text-blue-900 text-xs uppercase tracking-wider flex items-center gap-2">
               <Cpu className="h-4 w-4 text-blue-600" />
-              Análisis IA del Proyecto: {auditResult.profile.name}
+              Perfil del proyecto: {auditResult.profile.name}
             </h4>
+            {!auditResult.methodology.aiUsed && (
+              <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                Revisión con IA no disponible: {auditResult.methodology.aiNote}. Se muestran solo los resultados de los escáneres.
+              </p>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-700">
               <div className="space-y-1.5 bg-white p-3 rounded border border-blue-100">
-                <p><strong>Tipo Detectado:</strong> <span className="text-blue-700 font-semibold">{auditResult.profile.projectType}</span></p>
-                <p><strong>Resumen IA:</strong> {auditResult.profile.aiAnalysisSummary}</p>
+                <p><strong>Tipo detectado:</strong> <span className="text-blue-700 font-semibold">{auditResult.profile.projectType}</span></p>
+                <p><strong>Propósito:</strong> {auditResult.profile.purpose}</p>
+                <p><strong>Resumen:</strong> {auditResult.profile.aiAnalysisSummary}</p>
+                {auditResult.profile.frameworks.length > 0 && (
+                  <p><strong>Tecnologías:</strong> {auditResult.profile.frameworks.join(', ')}</p>
+                )}
               </div>
               <div className="space-y-1.5 bg-white p-3 rounded border border-blue-100">
-                <p><strong>Lenguaje Principal:</strong> <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">{auditResult.profile.primaryLanguage}</span></p>
-                <p><strong>Distribución de Lenguajes:</strong></p>
-                <div className="flex flex-wrap gap-1.5 mt-1">
-                  {auditResult.profile.languagesWithPercentages.map((lang, idx) => (
-                    <span key={idx} className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-700">
-                      {lang.name}: <strong>{lang.percentage}%</strong>
-                    </span>
+                <p><strong>Lenguaje principal:</strong> <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">{auditResult.profile.primaryLanguage}</span></p>
+                <div className="flex flex-wrap gap-1.5">
+                  {auditResult.profile.languagesWithPercentages.map((lang) => (
+                    <span key={lang.name} className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-700">{lang.name}: <strong>{lang.percentage}%</strong></span>
+                  ))}
+                </div>
+                <p className="pt-1"><strong>Carpetas principales:</strong></p>
+                <div className="flex flex-wrap gap-1.5">
+                  {auditResult.profile.topFolders.map((f) => (
+                    <span key={f.name} className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-700">{f.name}: {f.files}</span>
                   ))}
                 </div>
               </div>
             </div>
+            {auditResult.profile.architecture && (
+              <div className="bg-white p-3 rounded border border-blue-100 text-xs text-slate-700 space-y-1.5">
+                <p><strong>Arquitectura:</strong> {auditResult.profile.architecture.style} — {auditResult.profile.architecture.summary}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <p className="font-semibold text-emerald-700">Fortalezas</p>
+                    <ul className="list-disc pl-4">{auditResult.profile.architecture.strengths.map((x) => <li key={x}>{x}</li>)}</ul>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-amber-700">Riesgos</p>
+                    <ul className="list-disc pl-4">{auditResult.profile.architecture.risks.map((x) => <li key={x}>{x}</li>)}</ul>
+                  </div>
+                </div>
+              </div>
+            )}
+            {auditResult.profile.awsRecommendations.length > 0 && (
+              <div className="bg-white p-3 rounded border border-blue-100 text-xs text-slate-700">
+                <p className="font-semibold mb-1">Servicios AWS recomendados</p>
+                <ul className="space-y-1">
+                  {auditResult.profile.awsRecommendations.map((a) => (
+                    <li key={a.service}><span className="font-semibold text-slate-800">{a.service}:</span> {a.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Reporte de Hallazgos y Remediación Dinámica */}
-        {auditResult && auditResult.auditDetails && auditResult.auditDetails.length > 0 && (
+        {/* Hallazgos con evidencia */}
+        {auditResult && auditResult.auditDetails.length > 0 && (
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
             <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5">
               <Terminal className="h-4 w-4 text-blue-600" />
-              Reporte de Hallazgos y Errores Generados por el Analizador IA
+              Hallazgos del análisis ({auditResult.auditDetails.length})
             </h4>
             <div className="space-y-2.5">
-              {auditResult.auditDetails.map((detail, idx) => (
-                <div key={idx} className={`rounded-lg border p-3 text-xs bg-white ${detail.status === 'failed' ? 'border-red-200' : detail.status === 'warning' ? 'border-amber-200' : 'border-emerald-200'}`}>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-bold text-slate-800 flex items-center gap-1.5">
-                      {detail.status === 'passed' ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertCircle className="h-4 w-4 text-amber-600" />}
-                      {detail.title}
-                    </span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${detail.status === 'passed' ? 'bg-emerald-100 text-emerald-800' : detail.status === 'warning' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>
-                      {detail.status}
-                    </span>
-                  </div>
-                  <p className="text-slate-600 mb-1.5">{detail.description}</p>
-                  {detail.remediationSnippet && (
-                    <div className="mt-2 rounded bg-slate-900 p-2.5 text-slate-200 font-mono text-[11px] overflow-x-auto whitespace-pre-wrap">
-                      {detail.remediationSnippet}
+              {auditResult.auditDetails.map((detail, idx) => {
+                const st = STATUS_STYLE[detail.status];
+                return (
+                  <div key={idx} className={`rounded-lg border p-3 text-xs bg-white ${st.border}`}>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        {detail.status === 'passed' ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertCircle className={`h-4 w-4 ${detail.status === 'failed' ? 'text-red-600' : detail.status === 'warning' ? 'text-amber-600' : 'text-slate-400'}`} />}
+                        {detail.title}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{detail.source === 'ai' ? 'IA' : 'Escáner'}</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${st.badge}`}>{st.label}</span>
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
+                    <p className="text-slate-600 mb-1.5">{detail.description}</p>
+                    {detail.evidence && detail.evidence.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 rounded bg-slate-50 p-2 font-mono text-[11px] text-slate-600">
+                        {detail.evidence.map((ev) => <li key={ev} className="break-all">{ev}</li>)}
+                      </ul>
+                    )}
+                    {detail.remediationSnippet && (
+                      <div className="mt-2 rounded bg-slate-900 p-2.5 text-slate-200 font-mono text-[11px] overflow-x-auto whitespace-pre-wrap">
+                        {detail.remediationSnippet}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
