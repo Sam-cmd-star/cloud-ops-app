@@ -6,11 +6,17 @@
  *
  * Variables de entorno:
  *   GEMINI_API_KEY  (obligatoria)  llave de Google AI Studio
- *   GEMINI_MODEL    (opcional)     por defecto "gemini-2.5-flash"; cámbiala si Google retira o renombra el modelo
+ *   GEMINI_MODEL    (opcional)     modelo preferido de Gemini
  */
 declare const process: { env: Record<string, string | undefined> };
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// Lista de modelos de respaldo para evitar errores 404 si Google actualiza o retira un modelo
+const MODELS_TO_TRY = [
+  process.env.GEMINI_MODEL,
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro'
+].filter(Boolean) as string[];
 
 const SYSTEM = `Eres un auditor senior de seguridad y arquitectura de software.
 Recibes evidencia de un repositorio de GitHub: árbol de archivos, fragmentos de archivos clave y los hallazgos de escáneres automáticos.
@@ -35,7 +41,7 @@ Máximo 6 findings, 4 strengths, 4 risks y 4 awsRecommendations.`;
 const HTTP_ERRORS: Record<number, string> = {
   400: 'Gemini rechazó la solicitud (revisa que GEMINI_API_KEY sea válida)',
   403: 'La llave de Gemini no tiene permiso o la región no está habilitada',
-  404: `El modelo "${MODEL}" no existe; define GEMINI_MODEL con uno vigente de Google AI Studio`,
+  404: 'El modelo configurado no existe; actualiza GEMINI_MODEL en Vercel con uno vigente de Google AI Studio',
   429: 'Se alcanzó el límite gratuito de Gemini; espera un minuto e inténtalo de nuevo',
 };
 
@@ -52,22 +58,39 @@ export default async function handler(req: any, res: any) {
   const serialized = JSON.stringify(body);
   if (serialized.length > 150_000) return res.status(413).json({ error: 'La evidencia enviada es demasiado grande.' });
 
-  try {
-    const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
-      {
-        method: 'POST',
-        headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM }] },
-          contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
-          // 8192 deja margen: en los modelos con "thinking" los tokens de razonamiento cuentan dentro del límite.
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
-        }),
-      }
-    );
-    if (!apiRes.ok) return res.status(502).json({ error: HTTP_ERRORS[apiRes.status] ?? `Gemini respondió ${apiRes.status}.` });
+  let apiRes: Response | null = null;
+  let lastStatus = 502;
 
+  // Intentamos secuencialmente con los modelos disponibles para evitar caídas por nombres obsoletos
+  for (const model of MODELS_TO_TRY) {
+    try {
+      apiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: 'POST',
+          headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM }] },
+            contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
+          }),
+        }
+      );
+
+      lastStatus = apiRes.status;
+      if (apiRes.status !== 404) {
+        break; // Si el modelo responde correctamente o da otro error controlable, salimos del ciclo
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (!apiRes || !apiRes.ok) {
+    return res.status(502).json({ error: HTTP_ERRORS[lastStatus] ?? `Gemini respondió ${lastStatus}.` });
+  }
+
+  try {
     const data: any = await apiRes.json();
     if (data.promptFeedback?.blockReason) return res.status(502).json({ error: 'Gemini bloqueó la solicitud por sus filtros de seguridad.' });
 
