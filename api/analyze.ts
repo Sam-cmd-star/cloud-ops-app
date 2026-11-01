@@ -3,7 +3,14 @@
  */
 declare const process: { env: Record<string, string | undefined> };
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+// Lista de modelos ordenados por prioridad. Si uno falla por alta demanda (503) o no existe (404), prueba el siguiente.
+const MODELS_TO_TRY = [
+  process.env.GEMINI_MODEL,
+  'gemini-3.8-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro'
+].filter(Boolean) as string[];
 
 const SYSTEM = `Eres un auditor senior de seguridad y arquitectura de software.
 Recibes evidencia de un repositorio de GitHub: árbol de archivos, fragmentos de archivos clave y los hallazgos de escáneres automáticos.
@@ -38,25 +45,47 @@ export default async function handler(req: any, res: any) {
   const serialized = JSON.stringify(body);
   if (serialized.length > 150_000) return res.status(413).json({ error: 'La evidencia enviada es demasiado grande.' });
 
-  try {
-    const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM }] },
-          contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
-        }),
+  let apiRes: Response | null = null;
+  let lastErrorText = '';
+
+  // Iteramos sobre los modelos alternativos si alguno experimenta alta demanda (503) o no se encuentra (404)
+  for (const model of MODELS_TO_TRY) {
+    try {
+      apiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM }] },
+            contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
+          }),
+        }
+      );
+
+      if (apiRes.ok) {
+        break; // ¡Con éxito! Salimos del ciclo y procesamos la respuesta
+      } else {
+        lastErrorText = await apiRes.text();
+        // Si da 404 (no existe), 503 (alta demanda) o 429 (límite), probamos con el siguiente modelo de la lista
+        if ([404, 503, 429].includes(apiRes.status)) {
+          continue;
+        } else {
+          break; // Si es otro error crítico, salimos
+        }
       }
-    );
-
-    if (!apiRes.ok) {
-      const errText = await apiRes.text();
-      return res.status(502).json({ error: `Google API Error (${apiRes.status}): ${errText}` });
+    } catch (err: any) {
+      lastErrorText = err.message;
+      continue;
     }
+  }
 
+  if (!apiRes || !apiRes.ok) {
+    return res.status(502).json({ error: `Google API Error: ${lastErrorText || 'Todos los modelos fallaron.'}` });
+  }
+
+  try {
     const data: any = await apiRes.json();
     if (data.promptFeedback?.blockReason) return res.status(502).json({ error: 'Gemini bloqueó la solicitud por sus filtros de seguridad.' });
 
@@ -67,6 +96,6 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({ analysis: JSON.parse(text.slice(start, end + 1)) });
   } catch (err: any) {
-    return res.status(502).json({ error: `Error interno: ${err.message || 'Desconocido'}` });
+    return res.status(502).json({ error: `Error procesando respuesta: ${err.message || 'Desconocido'}` });
   }
 }
