@@ -3,7 +3,7 @@
  */
 declare const process: { env: Record<string, string | undefined> };
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 const SYSTEM = `Eres un auditor senior de seguridad y arquitectura de software.
 Recibes evidencia de un repositorio de GitHub: árbol de archivos, fragmentos de archivos clave y los hallazgos de escáneres automáticos.
@@ -54,7 +54,6 @@ export default async function handler(req: any, res: any) {
 
     if (!apiRes.ok) {
       const errText = await apiRes.text();
-      // Devolvemos el texto exacto que dice Google para verlo en la interfaz
       return res.status(502).json({ error: `Google API Error (${apiRes.status}): ${errText}` });
     }
 
