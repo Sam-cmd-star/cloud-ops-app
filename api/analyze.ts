@@ -1,12 +1,16 @@
 /**
- * api/analyze.ts — Vercel Serverless Function
+ * api/analyze.ts — Vercel Serverless Function (proveedor: Google Gemini)
  * Recibe la evidencia que recolectó el frontend (árbol, fragmentos de archivos, hallazgos de los
- * escáneres) y pide a Claude un análisis de arquitectura y código. La API key vive SOLO aquí
- * (variable de entorno ANTHROPIC_API_KEY); nunca debe ir en el código del navegador.
+ * escáneres) y pide a Gemini un análisis de arquitectura y código. La API key vive SOLO aquí
+ * (variable de entorno GEMINI_API_KEY); nunca debe ir en el código del navegador.
+ *
+ * Variables de entorno:
+ *   GEMINI_API_KEY  (obligatoria)  llave de Google AI Studio
+ *   GEMINI_MODEL    (opcional)     por defecto "gemini-2.5-flash"; cámbiala si Google retira o renombra el modelo
  */
 declare const process: { env: Record<string, string | undefined> };
 
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 const SYSTEM = `Eres un auditor senior de seguridad y arquitectura de software.
 Recibes evidencia de un repositorio de GitHub: árbol de archivos, fragmentos de archivos clave y los hallazgos de escáneres automáticos.
@@ -28,11 +32,18 @@ REGLAS
 }
 Máximo 6 findings, 4 strengths, 4 risks y 4 awsRecommendations.`;
 
+const HTTP_ERRORS: Record<number, string> = {
+  400: 'Gemini rechazó la solicitud (revisa que GEMINI_API_KEY sea válida)',
+  403: 'La llave de Gemini no tiene permiso o la región no está habilitada',
+  404: `El modelo "${MODEL}" no existe; define GEMINI_MODEL con uno vigente de Google AI Studio`,
+  429: 'Se alcanzó el límite gratuito de Gemini; espera un minuto e inténtalo de nuevo',
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido.' });
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: 'ANTHROPIC_API_KEY no está configurada en el servidor.' });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'GEMINI_API_KEY no está configurada en el servidor.' });
 
   const body = req.body;
   if (!body || typeof body !== 'object' || !body.repo || !Array.isArray(body.files)) {
@@ -42,23 +53,28 @@ export default async function handler(req: any, res: any) {
   if (serialized.length > 150_000) return res.status(413).json({ error: 'La evidencia enviada es demasiado grande.' });
 
   try {
-    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 2000,
-        system: SYSTEM,
-        messages: [{ role: 'user', content: `Evidencia del repositorio (JSON):\n${serialized}` }],
-      }),
-    });
-    if (!apiRes.ok) return res.status(502).json({ error: `El servicio de IA respondió ${apiRes.status}.` });
+    const apiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM }] },
+          contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
+          // 8192 deja margen: en los modelos con "thinking" los tokens de razonamiento cuentan dentro del límite.
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
+        }),
+      }
+    );
+    if (!apiRes.ok) return res.status(502).json({ error: HTTP_ERRORS[apiRes.status] ?? `Gemini respondió ${apiRes.status}.` });
 
     const data: any = await apiRes.json();
-    const text: string = (data.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+    if (data.promptFeedback?.blockReason) return res.status(502).json({ error: 'Gemini bloqueó la solicitud por sus filtros de seguridad.' });
+
+    const text: string = (data.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('');
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
-    if (start < 0 || end <= start) return res.status(502).json({ error: 'La IA no devolvió un JSON válido.' });
+    if (start < 0 || end <= start) return res.status(502).json({ error: 'La IA no devolvió un JSON válido (respuesta vacía o cortada).' });
 
     return res.status(200).json({ analysis: JSON.parse(text.slice(start, end + 1)) });
   } catch {
