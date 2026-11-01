@@ -85,6 +85,7 @@ const STATUS_STYLE: Record<string, { border: string; badge: string; label: strin
   warning: { border: 'border-amber-200', badge: 'bg-amber-100 text-amber-800', label: 'Advertencia' },
   failed: { border: 'border-red-200', badge: 'bg-red-100 text-red-800', label: 'Crítico' },
   unverified: { border: 'border-slate-200', badge: 'bg-slate-100 text-slate-600', label: 'No verificable' },
+  na: { border: 'border-slate-200', badge: 'bg-slate-100 text-slate-500', label: 'No aplica' },
 };
 
 const summaryCards = (r: RepoAuditResult | null): { label: string; tone: Tone; text: string }[] => {
@@ -92,8 +93,8 @@ const summaryCards = (r: RepoAuditResult | null): { label: string; tone: Tone; t
   return [
     {
       label: 'Secretos / API Keys',
-      tone: !c || c.secretsFound === null ? 'idle' : c.secretsFound === 0 ? 'ok' : 'bad',
-      text: !c ? '—' : c.secretsFound === null ? 'No verificado' : c.secretsFound === 0 ? '0 detectados' : `${c.secretsFound} posibles`,
+      tone: !c || c.secretsFound === null ? 'idle' : c.secretsFound > 0 ? 'bad' : c.secretsCoverage.scanned < c.secretsCoverage.total ? 'warn' : 'ok',
+      text: !c ? '—' : c.secretsFound === null ? 'No verificado' : c.secretsFound > 0 ? `${c.secretsFound} posibles` : c.secretsCoverage.scanned < c.secretsCoverage.total ? `0 en ${c.secretsCoverage.scanned}/${c.secretsCoverage.total} archivos` : '0 detectados',
     },
     {
       label: 'Branch Protection',
@@ -369,12 +370,12 @@ export const PlanningPage: React.FC = () => {
             </h4>
             {!auditResult.methodology.aiUsed && (
               <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-                Revisión con IA no disponible: {auditResult.methodology.aiNote}. Se muestran solo los resultados de los escáneres.
+                Revisión con IA no disponible: {auditResult.methodology.aiNote?.replace(/\.+$/, '')}. Se muestran solo los resultados de los escáneres.
               </p>
             )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-700">
               <div className="space-y-1.5 bg-white p-3 rounded border border-blue-100">
-                <p><strong>Tipo detectado:</strong> <span className="text-blue-700 font-semibold">{auditResult.profile.projectType}</span></p>
+                <p><strong>{auditResult.methodology.aiUsed ? 'Tipo detectado' : 'Stack detectado'}:</strong> <span className="text-blue-700 font-semibold">{auditResult.profile.projectType}</span></p>
                 <p><strong>Propósito:</strong> {auditResult.profile.purpose}</p>
                 <p><strong>Resumen:</strong> {auditResult.profile.aiAnalysisSummary}</p>
                 {auditResult.profile.frameworks.length > 0 && (
