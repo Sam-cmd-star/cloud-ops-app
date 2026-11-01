@@ -32,6 +32,10 @@ export interface ScoreItem {
   note: string;
 }
 
+export interface AiClaim { text: string; file?: string }
+export interface BestPractice { area: string; title: string; why: string; how: string; priority: 'alta' | 'media' | 'baja'; file?: string }
+export interface AwsRecommendation { service: string; reason: string; when: 'ahora' | 'futuro' }
+
 export interface ProjectProfile {
   name: string;
   description: string;
@@ -43,8 +47,9 @@ export interface ProjectProfile {
   aiAnalysisSummary: string;
   frameworks: string[];
   topFolders: { name: string; files: number }[];
-  architecture?: { style: string; summary: string; strengths: string[]; risks: string[] };
-  awsRecommendations: { service: string; reason: string }[];
+  architecture?: { style: string; summary: string; strengths: AiClaim[]; risks: AiClaim[] };
+  awsRecommendations: AwsRecommendation[];
+  bestPractices: BestPractice[];
 }
 
 export interface Methodology {
@@ -54,6 +59,7 @@ export interface Methodology {
   treeTruncated: boolean;
   scanners: string[];
   aiUsed: boolean;
+  aiModel?: string;
   aiNote?: string;
   limitations: string[];
 }
@@ -450,9 +456,10 @@ function scanStructure(tree: TreeItem[], pkg: any | null): { result: ScanResult;
 // ───────────────────────── Capa de IA (vía /api/analyze) ─────────────────────────
 interface AiAnalysis {
   projectType: string; purpose: string; summary: string;
-  architecture: { style: string; summary: string; strengths: string[]; risks: string[] };
+  architecture: { style: string; summary: string; strengths: unknown[]; risks: unknown[] };
   findings: { title: string; status: string; severity?: string; description: string; file?: string; remediation?: string }[];
-  awsRecommendations: { service: string; reason: string }[];
+  awsRecommendations: { service: string; reason: string; when?: string }[];
+  bestPractices?: { area?: string; title: string; why?: string; how?: string; priority?: string; file?: string }[];
 }
 
 function pickFilesForAi(files: Map<string, string>): { path: string; content: string }[] {
@@ -472,21 +479,31 @@ function pickFilesForAi(files: Map<string, string>): { path: string; content: st
   return out;
 }
 
-async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysis } | { ok: false; note: string }> {
+async function callAi(payload: unknown): Promise<{ ok: true; analysis: AiAnalysis; model?: string } | { ok: false; note: string }> {
   try {
     const res = await fetch(ANALYZE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await res.json().catch(() => ({}));
     if (res.status === 404) return { ok: false, note: 'No se encontró /api/analyze en este servidor (usa la URL desplegada o configura el proxy de Vite)' };
     if (res.status === 401) return { ok: false, note: 'El despliegue exige autenticación (Deployment Protection de Vercel); usa el dominio de producción del proyecto' };
     if (!res.ok || !data?.analysis) return { ok: false, note: data?.error ?? `El servicio de IA respondió ${res.status}.` };
-    return { ok: true, analysis: data.analysis as AiAnalysis };
+    return { ok: true, analysis: data.analysis as AiAnalysis, model: typeof data.model === 'string' ? data.model : undefined };
   } catch {
     return { ok: false, note: 'El servicio de IA no está disponible (¿falta desplegar /api/analyze?).' };
   }
 }
 
 const asStr = (v: unknown, max = 600) => (typeof v === 'string' ? v.slice(0, max) : '');
-const asList = (v: unknown) => (Array.isArray(v) ? v.map((x) => asStr(x, 300)).filter(Boolean).slice(0, 6) : []);
+/** Fortalezas/riesgos: se acepta texto suelto u objeto {text, file}; el archivo solo cuenta si existe en el árbol. */
+const asClaims = (v: unknown, treeSet: Set<string>): AiClaim[] =>
+  (Array.isArray(v) ? v : [])
+    .slice(0, 6)
+    .map((x: any) => {
+      const text = asStr(typeof x === 'string' ? x : x?.text, 300);
+      const file = x && typeof x === 'object' ? asStr(x.file, 300) : '';
+      return { text, file: file && treeSet.has(file) ? file : undefined };
+    })
+    .filter((c) => c.text);
+const PRIORITY_ORDER = { alta: 0, media: 1, baja: 2 } as const;
 
 // ───────────────────────── Función principal ─────────────────────────
 export async function auditRepository(owner: string, repo: string, token?: string): Promise<RepoAuditResult> {
@@ -565,8 +582,21 @@ export async function auditRepository(owner: string, repo: string, token?: strin
     const a = ai.analysis;
     aiProfile = {
       projectType: asStr(a.projectType, 120), purpose: asStr(a.purpose), aiAnalysisSummary: asStr(a.summary, 900),
-      architecture: { style: asStr(a.architecture?.style, 120), summary: asStr(a.architecture?.summary), strengths: asList(a.architecture?.strengths), risks: asList(a.architecture?.risks) },
-      awsRecommendations: (Array.isArray(a.awsRecommendations) ? a.awsRecommendations : []).slice(0, 5).map((x) => ({ service: asStr(x?.service, 80), reason: asStr(x?.reason, 240) })).filter((x) => x.service),
+      architecture: { style: asStr(a.architecture?.style, 120), summary: asStr(a.architecture?.summary), strengths: asClaims(a.architecture?.strengths, treeSet), risks: asClaims(a.architecture?.risks, treeSet) },
+      awsRecommendations: (Array.isArray(a.awsRecommendations) ? a.awsRecommendations : []).slice(0, 5)
+        .map((x): AwsRecommendation => ({ service: asStr(x?.service, 80), reason: asStr(x?.reason, 240), when: x?.when === 'futuro' ? 'futuro' : 'ahora' }))
+        .filter((x) => x.service),
+      bestPractices: (Array.isArray(a.bestPractices) ? a.bestPractices : []).slice(0, 8)
+        .map((x): BestPractice => {
+          const file = asStr(x?.file, 300);
+          return {
+            area: asStr(x?.area, 40) || 'General', title: asStr(x?.title, 140), why: asStr(x?.why, 400), how: asStr(x?.how, 900),
+            priority: (['alta', 'media', 'baja'] as const).find((q) => q === x?.priority) ?? 'media',
+            file: file && treeSet.has(file) ? file : undefined,
+          };
+        })
+        .filter((x) => x.title && x.how)
+        .sort((x, y) => PRIORITY_ORDER[x.priority] - PRIORITY_ORDER[y.priority]),
     };
     const statuses: CheckStatus[] = ['passed', 'warning', 'failed'];
     for (const f of (Array.isArray(a.findings) ? a.findings : []).slice(0, 8)) {
@@ -588,7 +618,7 @@ export async function auditRepository(owner: string, repo: string, token?: strin
     lockText ? 'Dependencias: solo npm y solo las directas (las transitivas no se auditan); versiones tomadas de package-lock.json.' : 'Dependencias: solo npm y solo las directas; sin package-lock.json se usa la versión mínima declarada.',
     `Se leyeron ${files.size} de ${candidates} archivos de texto (tope de ${MAX_SCAN_FILES}).`,
     ...(treeData.truncated ? ['El árbol del repositorio es muy grande y GitHub lo devolvió incompleto.'] : []),
-    ...(!ai.ok ? [] : ['La IA solo recibió fragmentos de los archivos clave, con credenciales redactadas.']),
+    ...(!ai.ok ? [] : ['La IA solo recibió fragmentos de los archivos clave, con credenciales redactadas.', 'Las observaciones y buenas prácticas de la IA son estimaciones: verifícalas en el archivo citado antes de darlas por ciertas.']),
   ];
 
   return {
@@ -609,14 +639,16 @@ export async function auditRepository(owner: string, repo: string, token?: strin
       topFolders: structure.folders,
       architecture: aiProfile.architecture,
       awsRecommendations: aiProfile.awsRecommendations ?? [],
+      bestPractices: aiProfile.bestPractices ?? [],
     },
     methodology: {
       filesInTree: tree.filter((t) => t.type === 'blob').length,
       filesScanned: files.size,
       filesCandidates: candidates,
       treeTruncated: !!treeData.truncated,
-      scanners: ['Secretos (regex)', 'Dependencias (OSV.dev)', 'DevOps', 'Higiene del repo', 'Estructura', ...(ai.ok ? ['Revisión de arquitectura con IA'] : [])],
+      scanners: ['Secretos (regex)', 'Dependencias (OSV.dev)', 'DevOps', 'Higiene del repo', 'Estructura', ...(ai.ok ? [`Revisión de arquitectura con IA${ai.model ? ` (${ai.model})` : ''}`] : [])],
       aiUsed: ai.ok,
+      aiModel: ai.ok ? ai.model : undefined,
       aiNote: ai.ok ? undefined : ai.note,
       limitations,
     },

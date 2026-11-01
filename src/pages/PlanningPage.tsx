@@ -7,7 +7,7 @@ import { REGION_OPTIONS } from '../data/mockInfrastructure';
 import { SLA_OPTIONS, estimateLines, getUserTier, requiresMultiAz, sumMonthly } from '../data/pricing';
 import { ServiceIcon } from '../components/serviceIcons';
 import { auditRepository } from '../services/githubSecurityService';
-import type { RepoAuditResult } from '../services/githubSecurityService';
+import type { AiClaim, RepoAuditResult } from '../services/githubSecurityService';
 import {
   ClipboardList,
   PlusCircle,
@@ -106,6 +106,45 @@ const summaryCards = (r: RepoAuditResult | null): { label: string; tone: Tone; t
   ];
 };
 
+const PRIORITY_STYLE: Record<string, string> = {
+  alta: 'bg-red-100 text-red-800',
+  media: 'bg-amber-100 text-amber-800',
+  baja: 'bg-slate-100 text-slate-600',
+};
+
+/** Fortalezas/riesgos de la IA: muestran el archivo que las respalda o avisan que son hipótesis. */
+const ClaimList: React.FC<{ items: AiClaim[] }> = ({ items }) => (
+  <ul className="list-disc pl-4 space-y-1">
+    {items.map((x) => (
+      <li key={x.text}>
+        {x.text}{' '}
+        {x.file ? (
+          <code className="break-all rounded bg-slate-100 px-1 text-[10px] text-slate-600">{x.file}</code>
+        ) : (
+          <em className="text-[10px] text-slate-400">(sin archivo citado: verifícalo)</em>
+        )}
+      </li>
+    ))}
+  </ul>
+);
+
+/** Relaciona el nombre de un servicio recomendado por la IA con tu catálogo (INITIAL_SERVICES). */
+const CATALOG_STOP = new Set(['amazon', 'aws', 'con', 'de', 'del', 'y', 'la', 'el', 'the', 'and', 'for', 'service', 'services', 'servicio']);
+const nameTokens = (s: string) =>
+  s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter((tk) => tk && !CATALOG_STOP.has(tk));
+const matchCatalog = (name: string) => {
+  const a = nameTokens(name);
+  if (!a.length) return undefined;
+  let best: { srv: (typeof INITIAL_SERVICES)[number]; score: number } | undefined;
+  for (const srv of INITIAL_SERVICES) {
+    const b = nameTokens(srv.name);
+    if (!b.length) continue;
+    const shared = b.filter((tk) => a.includes(tk)).length;
+    if ((shared === b.length || shared === a.length) && (!best || shared > best.score)) best = { srv, score: shared };
+  }
+  return best?.srv;
+};
+
 export const PlanningPage: React.FC = () => {
   const { proposals, addProposal, updateProposal, deleteProposal, setActiveTab } = useCloudOps();
 
@@ -145,6 +184,13 @@ export const PlanningPage: React.FC = () => {
     const next = selectedServices.includes(name) ? selectedServices.filter((s) => s !== name) : [...selectedServices, name];
     setSelectedServices(next);
     if (!descriptionTouched) set('description', buildDescription(next));
+  };
+
+  const addRecommendedService = (name: string) => {
+    if (selectedServices.includes(name)) return;
+    toggleService(name);
+    setNotice(`"${name}" se agregó a la propuesta. Revisa el costo estimado en el formulario.`);
+    document.getElementById('plan-services')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
   const regenerateDescription = () => {
@@ -403,11 +449,11 @@ export const PlanningPage: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <p className="font-semibold text-emerald-700">Fortalezas</p>
-                    <ul className="list-disc pl-4">{auditResult.profile.architecture.strengths.map((x) => <li key={x}>{x}</li>)}</ul>
+                    <ClaimList items={auditResult.profile.architecture.strengths} />
                   </div>
                   <div>
                     <p className="font-semibold text-amber-700">Riesgos</p>
-                    <ul className="list-disc pl-4">{auditResult.profile.architecture.risks.map((x) => <li key={x}>{x}</li>)}</ul>
+                    <ClaimList items={auditResult.profile.architecture.risks} />
                   </div>
                 </div>
               </div>
@@ -415,9 +461,63 @@ export const PlanningPage: React.FC = () => {
             {auditResult.profile.awsRecommendations.length > 0 && (
               <div className="bg-white p-3 rounded border border-blue-100 text-xs text-slate-700">
                 <p className="font-semibold mb-1">Servicios AWS recomendados</p>
-                <ul className="space-y-1">
-                  {auditResult.profile.awsRecommendations.map((a) => (
-                    <li key={a.service}><span className="font-semibold text-slate-800">{a.service}:</span> {a.reason}</li>
+                <ul className="space-y-2">
+                  {auditResult.profile.awsRecommendations.map((a) => {
+                    const srv = matchCatalog(a.service);
+                    const included = !!srv && selectedServices.includes(srv.name);
+                    return (
+                      <li key={a.service} className="rounded border border-slate-200 p-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-800">
+                            {a.service}
+                            {a.when === 'futuro' && (
+                              <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">Si habilitas el backend</span>
+                            )}
+                          </span>
+                          {srv ? (
+                            <span className="flex items-center gap-2">
+                              <span className="text-[11px] text-slate-500">{srv.estimatedCost === 0 ? 'Sin costo' : `desde ${money(srv.estimatedCost)}/mes`}</span>
+                              <button
+                                type="button"
+                                disabled={included}
+                                onClick={() => addRecommendedService(srv.name)}
+                                className="rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-default disabled:bg-slate-300"
+                              >
+                                {included ? 'Ya incluido' : 'Agregar a la propuesta'}
+                              </button>
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-slate-400">No está en tu catálogo de costos</span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-slate-600">{a.reason}</p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+
+            {auditResult.profile.bestPractices.length > 0 && (
+              <div className="bg-white p-3 rounded border border-blue-100 text-xs text-slate-700 space-y-2">
+                <p className="font-semibold">
+                  Buenas prácticas para mejorar el proyecto{' '}
+                  <span className="font-normal text-slate-400">(sugeridas por IA: verifícalas antes de aplicarlas)</span>
+                </p>
+                <ul className="space-y-2">
+                  {auditResult.profile.bestPractices.map((bp) => (
+                    <li key={bp.title} className="rounded border border-slate-200 p-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-semibold text-slate-800">{bp.title}</span>
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{bp.area}</span>
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${PRIORITY_STYLE[bp.priority]}`}>{bp.priority}</span>
+                        </span>
+                      </div>
+                      <p className="mt-1 text-slate-600"><strong>Por qué:</strong> {bp.why}</p>
+                      <p className="mt-0.5 whitespace-pre-wrap text-slate-600"><strong>Cómo:</strong> {bp.how}</p>
+                      {bp.file && <code className="mt-1 inline-block break-all rounded bg-slate-100 px-1 text-[10px] text-slate-600">{bp.file}</code>}
+                    </li>
                   ))}
                 </ul>
               </div>
@@ -531,7 +631,7 @@ export const PlanningPage: React.FC = () => {
             </div>
           </div>
 
-          <fieldset>
+          <fieldset id="plan-services">
             <legend className={LABEL}>Servicios AWS incluidos * <span className="font-normal text-slate-500">({selectedServices.length} de {INITIAL_SERVICES.length})</span></legend>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {INITIAL_SERVICES.map((srv) => {
