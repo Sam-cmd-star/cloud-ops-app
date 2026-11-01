@@ -1,16 +1,9 @@
 /**
  * api/analyze.ts — Vercel Serverless Function (proveedor: Google Gemini)
- * Recibe la evidencia que recolectó el frontend (árbol, fragmentos de archivos, hallazgos de los
- * escáneres) y pide a Gemini un análisis de arquitectura y código. La API key vive SOLO aquí
- * (variable de entorno GEMINI_API_KEY); nunca debe ir en el código del navegador.
- *
- * Variables de entorno:
- *   GEMINI_API_KEY  (obligatoria)  llave de Google AI Studio
- *   GEMINI_MODEL    (opcional)     por defecto "gemini-2.5-flash"; cámbiala si Google retira o renombra el modelo
  */
 declare const process: { env: Record<string, string | undefined> };
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 const SYSTEM = `Eres un auditor senior de seguridad y arquitectura de software.
 Recibes evidencia de un repositorio de GitHub: árbol de archivos, fragmentos de archivos clave y los hallazgos de escáneres automáticos.
@@ -32,13 +25,6 @@ REGLAS
 }
 Máximo 6 findings, 4 strengths, 4 risks y 4 awsRecommendations.`;
 
-const HTTP_ERRORS: Record<number, string> = {
-  400: 'Gemini rechazó la solicitud (revisa que GEMINI_API_KEY sea válida)',
-  403: 'La llave de Gemini no tiene permiso o la región no está habilitada',
-  404: `El modelo "${MODEL}" no existe; define GEMINI_MODEL con uno vigente de Google AI Studio`,
-  429: 'Se alcanzó el límite gratuito de Gemini; espera un minuto e inténtalo de nuevo',
-};
-
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido.' });
 
@@ -54,19 +40,23 @@ export default async function handler(req: any, res: any) {
 
   try {
     const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
-        headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SYSTEM }] },
           contents: [{ role: 'user', parts: [{ text: `Evidencia del repositorio (JSON):\n${serialized}` }] }],
-          // 8192 deja margen: en los modelos con "thinking" los tokens de razonamiento cuentan dentro del límite.
           generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
         }),
       }
     );
-    if (!apiRes.ok) return res.status(502).json({ error: HTTP_ERRORS[apiRes.status] ?? `Gemini respondió ${apiRes.status}.` });
+
+    if (!apiRes.ok) {
+      const errText = await apiRes.text();
+      // Devolvemos el texto exacto que dice Google para verlo en la interfaz
+      return res.status(502).json({ error: `Google API Error (${apiRes.status}): ${errText}` });
+    }
 
     const data: any = await apiRes.json();
     if (data.promptFeedback?.blockReason) return res.status(502).json({ error: 'Gemini bloqueó la solicitud por sus filtros de seguridad.' });
@@ -77,7 +67,7 @@ export default async function handler(req: any, res: any) {
     if (start < 0 || end <= start) return res.status(502).json({ error: 'La IA no devolvió un JSON válido (respuesta vacía o cortada).' });
 
     return res.status(200).json({ analysis: JSON.parse(text.slice(start, end + 1)) });
-  } catch {
-    return res.status(502).json({ error: 'No se pudo completar el análisis con IA.' });
+  } catch (err: any) {
+    return res.status(502).json({ error: `Error interno: ${err.message || 'Desconocido'}` });
   }
 }
